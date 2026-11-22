@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo } from "react";
+import React, { useState, useMemo, useEffect, useRef } from "react";
 import {
   Search,
   Plus,
@@ -17,6 +17,7 @@ import {
   ShieldAlert,
   Camera,
   Images,
+  ChevronDown,
   MessageCircle,
   Send,
 } from "lucide-react";
@@ -86,6 +87,8 @@ const CHAT_SUGGESTIONS = [
   "هل يوجد تكرار في المواد الفعالة بمخزوني؟",
 ];
 
+const PAGE_SIZE_OPTIONS = [12, 24, 48];
+
 export default function MedicineDashboard({
   initialMedicines,
   user,
@@ -108,7 +111,14 @@ export default function MedicineDashboard({
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [selectedStatus, setSelectedStatus] = useState("all");
+  const [pageSize, setPageSize] = useState(PAGE_SIZE_OPTIONS[0]);
+  const [currentPage, setCurrentPage] = useState(1);
   const [showDuplicatesModal, setShowDuplicatesModal] = useState(false);
+  const [showAddMenu, setShowAddMenu] = useState(false);
+  const addMenuRef = useRef<HTMLDivElement>(null);
+  const addMenuButtonRef = useRef<HTMLButtonElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+  const imageInputRef = useRef<HTMLInputElement>(null);
 
   // Modal state for Add / Edit
   const [isFormOpen, setIsFormOpen] = useState(false);
@@ -122,6 +132,8 @@ export default function MedicineDashboard({
   const [chatMessages, setChatMessages] = useState<PharmacyChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [chatStreaming, setChatStreaming] = useState(false);
+  const chatMessagesContainerRef = useRef<HTMLDivElement>(null);
   const [scopeLoading, setScopeLoading] = useState(false);
   const [pendingScope, setPendingScope] = useState<{
     scope: "personal" | "family";
@@ -196,11 +208,69 @@ export default function MedicineDashboard({
     });
   }, [medicines, selectedCategory, selectedStatus, search]);
 
+  const pageCount = Math.max(1, Math.ceil(filteredMedicines.length / pageSize));
+  const visiblePage = Math.min(currentPage, pageCount);
+  const firstPage = Math.min(Math.max(1, visiblePage - 2), Math.max(1, pageCount - 4));
+  const pageNumbers = Array.from(
+    { length: Math.min(pageCount, 5) },
+    (_, index) => firstPage + index
+  );
+  const firstVisibleItem = filteredMedicines.length
+    ? (visiblePage - 1) * pageSize + 1
+    : 0;
+  const lastVisibleItem = Math.min(
+    visiblePage * pageSize,
+    filteredMedicines.length
+  );
+  const paginatedMedicines = useMemo(() => {
+    const start = (visiblePage - 1) * pageSize;
+    return filteredMedicines.slice(start, start + pageSize);
+  }, [filteredMedicines, pageSize, visiblePage]);
+
+  useEffect(() => {
+    setCurrentPage((page) => Math.min(page, pageCount));
+  }, [pageCount]);
+
+  useEffect(() => {
+    if (!showChat || !chatMessagesContainerRef.current) return;
+    chatMessagesContainerRef.current.scrollTop =
+      chatMessagesContainerRef.current.scrollHeight;
+  }, [chatMessages, chatLoading, chatStreaming, showChat]);
+
+  useEffect(() => {
+    if (!showAddMenu) return;
+
+    function handlePointerDown(event: MouseEvent) {
+      if (event.target instanceof Node && !addMenuRef.current?.contains(event.target)) {
+        setShowAddMenu(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setShowAddMenu(false);
+        addMenuButtonRef.current?.focus();
+      }
+    }
+
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showAddMenu]);
+
   function scopeHeaders() {
     return {
       "x-pharmacy-scope": scope,
       "x-family-id": scope === "family" ? activeFamilyId : "",
     };
+  }
+
+  function selectStatus(status: string) {
+    setSelectedStatus(status);
+    setCurrentPage(1);
   }
 
   async function switchScope(nextScope: "personal" | "family", familyId = activeFamilyId) {
@@ -218,6 +288,7 @@ export default function MedicineDashboard({
       setMedicines(await res.json());
       setScope(nextScope);
       setActiveFamilyId(familyId);
+      setCurrentPage(1);
       setChatMessages([]);
     } catch (error) {
       alert(error instanceof Error ? error.message : "تعذر تبديل المخزون.");
@@ -244,6 +315,8 @@ export default function MedicineDashboard({
     if (!message || chatLoading) return;
 
     const history = chatMessages;
+    let assistantMessageStarted = false;
+    let assistantAnswer = "";
     setChatMessages((current) => [...current, { role: "user", content: message }]);
     setChatInput("");
     setChatLoading(true);
@@ -253,25 +326,72 @@ export default function MedicineDashboard({
         headers: { "Content-Type": "application/json", ...scopeHeaders() },
         body: JSON.stringify({ message, history }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "تعذر الحصول على إجابة");
-      setChatMessages((current) => [
-        ...current,
-        { role: "model", content: data.answer },
-      ]);
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "تعذر الحصول على إجابة");
+      }
+      if (!res.body) throw new Error("تعذر قراءة إجابة المساعد.");
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      while (true) {
+        let chunkResult: ReadableStreamReadResult<Uint8Array>;
+        try {
+          chunkResult = await reader.read();
+        } catch {
+          throw new Error("تعذر الاتصال بمساعد الصيدلية.");
+        }
+        const { done, value } = chunkResult;
+        const chunk = done ? decoder.decode() : decoder.decode(value, { stream: true });
+        if (chunk) {
+          assistantAnswer += chunk;
+          if (!assistantMessageStarted) {
+            assistantMessageStarted = true;
+            setChatStreaming(true);
+            setChatMessages((current) => [
+              ...current,
+              { role: "model", content: assistantAnswer },
+            ]);
+          } else {
+            setChatMessages((current) => {
+              const lastIndex = current.length - 1;
+              if (lastIndex < 0 || current[lastIndex].role !== "model") {
+                return [...current, { role: "model", content: assistantAnswer }];
+              }
+              return [
+                ...current.slice(0, lastIndex),
+                { ...current[lastIndex], content: assistantAnswer },
+              ];
+            });
+          }
+        }
+        if (done) break;
+      }
+      if (!assistantAnswer.trim()) {
+        throw new Error("لم أتمكن من إنشاء إجابة. حاول مرة أخرى.");
+      }
     } catch (error) {
-      setChatMessages((current) => [
-        ...current,
-        {
-          role: "model",
-          content:
-            error instanceof Error
-              ? error.message
-              : "تعذر الاتصال بمساعد الصيدلية.",
-        },
-      ]);
+      const errorMessage = assistantMessageStarted
+        ? "تعذر إكمال الإجابة بسبب انقطاع الاتصال."
+        : error instanceof Error
+          ? error.message
+          : "تعذر الاتصال بمساعد الصيدلية.";
+      setChatMessages((current) => {
+        const lastIndex = current.length - 1;
+        if (assistantMessageStarted && lastIndex >= 0 && current[lastIndex].role === "model") {
+          return [
+            ...current.slice(0, lastIndex),
+            {
+              ...current[lastIndex],
+              content: `${assistantAnswer}\n\n${errorMessage}`,
+            },
+          ];
+        }
+        return [...current, { role: "model", content: errorMessage }];
+      });
     } finally {
       setChatLoading(false);
+      setChatStreaming(false);
     }
   }
 
@@ -360,6 +480,7 @@ export default function MedicineDashboard({
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || "تعذر إضافة الدواء");
         setMedicines((prev) => [data, ...prev]);
+        setCurrentPage(1);
       }
       setIsFormOpen(false);
     } catch (error) {
@@ -547,122 +668,200 @@ export default function MedicineDashboard({
   return (
     <div className="min-h-screen pb-12">
       {/* Header */}
-      <header className="bg-emerald-800 text-white shadow-md">
-        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-6">
-          <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+      <header className="bg-gradient-to-br from-emerald-950 via-emerald-800 to-teal-800 text-white shadow-lg">
+        <div className="mx-auto max-w-7xl space-y-5 px-4 py-5 sm:px-6 lg:px-8">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
             <div className="flex items-center gap-3">
-              <div className="bg-emerald-700 p-3 rounded-xl">
-                <Pill className="w-7 h-7 text-emerald-100" />
+              <div className="rounded-2xl border border-white/15 bg-white/10 p-3 shadow-inner">
+                <Pill className="h-7 w-7 text-emerald-100" />
               </div>
               <div>
-                <h1 className="text-2xl font-bold">صيدليتي المنزلية</h1>
-                <p className="text-emerald-100 text-sm">
+                <h1 className="text-2xl font-bold tracking-tight">صيدليتي المنزلية</h1>
+                <p className="mt-1 text-sm text-emerald-100">
                   إدارة مخزون الأدوية والمستلزمات الطبية وتنبيهات الصلاحية
                 </p>
               </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              <label className="inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-700 text-white font-semibold px-4 py-2.5 rounded-lg text-sm cursor-pointer transition">
-                <Camera className="w-4 h-4" />
-                تصوير وإضافة بالذكاء الاصطناعي
-                <input
-                  type="file"
-                  accept="image/*"
-                  capture="environment"
-                  className="hidden"
-                  onChange={(event) => handleImageUpload(event.target.files?.[0])}
-                  disabled={scanning}
-                />
-              </label>
-              <label className="inline-flex items-center gap-2 bg-white/15 hover:bg-white/25 text-white px-3.5 py-2.5 rounded-lg text-sm cursor-pointer transition">
-                <Images className="w-4 h-4" />
-                رفع صورة من المعرض
-                <input
-                  type="file"
-                  accept="image/*"
-                  className="hidden"
-                  onChange={(event) => handleImageUpload(event.target.files?.[0])}
-                  disabled={scanning}
-                />
-              </label>
-              <button
-                onClick={logout}
-                disabled={logoutLoading}
-                className="inline-flex items-center gap-2 bg-emerald-950/40 hover:bg-emerald-950/60 text-white px-3.5 py-2.5 rounded-lg text-sm transition disabled:opacity-60"
-              >
-                {logoutLoading && <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />}
-                {logoutLoading ? "جارٍ تسجيل الخروج..." : "تسجيل الخروج"}
-              </button>
-              <div className="flex bg-emerald-700 rounded-lg p-1">
-                <button
-                  onClick={() => switchScope("personal")}
-                  disabled={scopeLoading}
-                  className={`px-3 py-2 rounded-md text-sm font-semibold transition ${
-                    scope === "personal" ? "bg-white text-emerald-900" : "text-emerald-100"
-                  } disabled:opacity-60`}
-                >
-                  {pendingScope?.scope === "personal" ? "جارٍ التحميل..." : "صيدليتي الخاصة"}
-                </button>
-                {families.map((family) => (
-                  <button
-                    key={family.id}
-                    onClick={() => switchScope("family", family.id)}
-                    disabled={scopeLoading}
-                    className={`px-3 py-2 rounded-md text-sm font-semibold transition ${
-                      scope === "family" && activeFamilyId === family.id
-                        ? "bg-white text-emerald-900"
-                        : "text-emerald-100"
-                    } disabled:opacity-60`}
-                  >
-                    {pendingScope?.scope === "family" && pendingScope.familyId === family.id
-                      ? "جارٍ التحميل..."
-                      : family.name}
-                  </button>
-                ))}
+            <div className="flex items-center justify-between gap-3 rounded-xl border border-white/10 bg-white/5 px-3 py-2 sm:justify-start">
+              <div className="min-w-0">
+                <p className="text-xs text-emerald-200">مرحباً</p>
+                <p className="truncate text-sm font-semibold">{user.name}</p>
               </div>
-              {families.length > 0 && (
-                <button
-                  onClick={() => setShowFamilyModal(true)}
-                  className="inline-flex items-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white px-3.5 py-2.5 rounded-lg text-sm transition"
-                >
-                  إدارة أفراد العائلة
-                </button>
-              )}
-              <button
-                onClick={() => setShowChat(true)}
-                className="inline-flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white font-semibold px-4 py-2.5 rounded-lg text-sm transition"
-              >
-                <MessageCircle className="w-4 h-4" />
-                اسأل صيدليتي
-              </button>
-              <button
-                onClick={() => setShowDuplicatesModal(true)}
-                className="inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold px-4 py-2.5 rounded-lg text-sm transition"
-              >
-                <ShieldAlert className="w-4 h-4" />
-                تنبيهات التكرار ({duplicateGroups.length})
-              </button>
-              <button
-                onClick={handleResetSeed}
-                disabled={loading}
-                className="inline-flex items-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white px-3.5 py-2.5 rounded-lg text-sm transition"
-                title="إعادة تحميل البيانات الأولية"
-              >
-                {pendingAction === "reset" ? (
-                  <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
-                ) : (
-                  <RotateCcw className="w-4 h-4" />
+              <div className="flex shrink-0 items-center gap-2">
+                {families.length > 0 && (
+                  <button
+                    onClick={() => setShowFamilyModal(true)}
+                    className="inline-flex min-h-10 items-center justify-center rounded-lg border border-white/20 bg-white/10 px-3 py-2 text-sm transition hover:bg-white/20"
+                  >
+                    إدارة العائلة
+                  </button>
                 )}
-                {pendingAction === "reset" ? "جارٍ استعادة المخزون..." : "استعادة المخزون الأصلي"}
-              </button>
-              <button
-                onClick={openAddModal}
-                className="inline-flex items-center gap-2 bg-white text-emerald-900 hover:bg-emerald-50 font-bold px-4 py-2.5 rounded-lg text-sm shadow transition"
-              >
-                <Plus className="w-4 h-4" />
-                إضافة دواء جديد
-              </button>
+                <button
+                  onClick={logout}
+                  disabled={logoutLoading}
+                  className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-white/10 px-3 py-2 text-sm transition hover:bg-white/20 disabled:opacity-60"
+                >
+                  {logoutLoading && <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />}
+                  {logoutLoading ? "جارٍ الخروج..." : "تسجيل الخروج"}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="space-y-4 rounded-2xl border border-white/15 bg-white/10 p-3 shadow-inner backdrop-blur-sm sm:p-4">
+            <div className="flex flex-col gap-3 xl:flex-row xl:items-center xl:justify-between">
+              <div className="w-fit max-w-full">
+                <p className="mb-2 text-xs font-semibold tracking-wide text-emerald-100">
+                  المخزون الحالي
+                </p>
+                <div className="flex w-fit max-w-full flex-wrap gap-1 rounded-xl bg-emerald-950/35 p-1">
+                  <button
+                    onClick={() => switchScope("personal")}
+                    disabled={scopeLoading}
+                    className={`rounded-lg px-3 py-2 text-sm font-semibold transition disabled:opacity-60 ${
+                      scope === "personal" ? "bg-white text-emerald-950 shadow" : "text-emerald-50 hover:bg-white/10"
+                    }`}
+                  >
+                    {pendingScope?.scope === "personal" ? "جارٍ التحميل..." : "صيدليتي الخاصة"}
+                  </button>
+                  {families.map((family) => (
+                    <button
+                      key={family.id}
+                      onClick={() => switchScope("family", family.id)}
+                      disabled={scopeLoading}
+                      className={`rounded-lg px-3 py-2 text-sm font-semibold transition disabled:opacity-60 ${
+                        scope === "family" && activeFamilyId === family.id
+                          ? "bg-white text-emerald-950 shadow"
+                          : "text-emerald-50 hover:bg-white/10"
+                      }`}
+                    >
+                      {pendingScope?.scope === "family" && pendingScope.familyId === family.id
+                        ? "جارٍ التحميل..."
+                        : family.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 sm:flex sm:flex-wrap sm:items-center">
+                <div ref={addMenuRef} className="relative col-span-2 inline-flex min-h-11 w-full sm:col-span-1 sm:w-auto">
+                  <div className="inline-flex w-full rounded-xl shadow-sm sm:w-auto">
+                    <button
+                      onClick={() => {
+                        setShowAddMenu(false);
+                        openAddModal();
+                      }}
+                      className="inline-flex min-h-11 flex-1 items-center justify-center gap-2 rounded-s-xl bg-white px-3 py-2 text-sm font-bold text-emerald-950 transition hover:bg-emerald-50 sm:flex-none"
+                    >
+                      <Plus className="h-4 w-4" />
+                      إضافة دواء
+                    </button>
+                    <button
+                      ref={addMenuButtonRef}
+                      type="button"
+                      onClick={() => setShowAddMenu((open) => !open)}
+                      aria-label="خيارات إضافة دواء"
+                      aria-haspopup="menu"
+                      aria-expanded={showAddMenu}
+                      className="inline-flex min-h-11 items-center justify-center rounded-e-xl border-s border-emerald-200 bg-white px-2 text-emerald-950 transition hover:bg-emerald-50"
+                    >
+                      <ChevronDown className="h-4 w-4" />
+                    </button>
+                  </div>
+                  {showAddMenu && (
+                    <div
+                      role="menu"
+                      aria-label="خيارات إضافة دواء"
+                      className="absolute right-0 top-full z-50 mt-2 w-60 overflow-hidden rounded-xl border border-slate-200 bg-white p-1.5 text-slate-800 shadow-xl"
+                    >
+                      <button
+                        type="button"
+                        role="menuitem"
+                        onClick={() => {
+                          setShowAddMenu(false);
+                          openAddModal();
+                        }}
+                        className="flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-2 text-right text-sm transition hover:bg-slate-100"
+                      >
+                        <Plus className="h-4 w-4 text-emerald-700" />
+                        إضافة يدوية
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={scanning}
+                        onClick={() => {
+                          setShowAddMenu(false);
+                          cameraInputRef.current?.click();
+                        }}
+                        className="flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-2 text-right text-sm transition hover:bg-slate-100 disabled:opacity-50"
+                      >
+                        <Camera className="h-4 w-4 text-sky-600" />
+                        تصوير دواء بالذكاء الاصطناعي
+                      </button>
+                      <button
+                        type="button"
+                        role="menuitem"
+                        disabled={scanning}
+                        onClick={() => {
+                          setShowAddMenu(false);
+                          imageInputRef.current?.click();
+                        }}
+                        className="flex min-h-11 w-full items-center gap-2 rounded-lg px-3 py-2 text-right text-sm transition hover:bg-slate-100 disabled:opacity-50"
+                      >
+                        <Images className="h-4 w-4 text-slate-600" />
+                        رفع صورة
+                      </button>
+                    </div>
+                  )}
+                  <input
+                    ref={cameraInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    aria-label="تصوير دواء بالذكاء الاصطناعي"
+                    className="hidden"
+                    onChange={(event) => {
+                      void handleImageUpload(event.currentTarget.files?.[0]);
+                      event.currentTarget.value = "";
+                    }}
+                    disabled={scanning}
+                  />
+                  <input
+                    ref={imageInputRef}
+                    type="file"
+                    accept="image/*"
+                    aria-label="رفع صورة"
+                    className="hidden"
+                    onChange={(event) => {
+                      void handleImageUpload(event.currentTarget.files?.[0]);
+                      event.currentTarget.value = "";
+                    }}
+                    disabled={scanning}
+                  />
+                </div>
+                <button
+                  onClick={() => setShowDuplicatesModal(true)}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-amber-400 px-3 py-2 text-sm font-semibold text-amber-950 transition hover:bg-amber-300"
+                >
+                  <ShieldAlert className="h-4 w-4" />
+                  التكرار ({duplicateGroups.length})
+                </button>
+                <button
+                  onClick={handleResetSeed}
+                  disabled={loading}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-white/20 bg-white/10 px-3 py-2 text-sm transition hover:bg-white/20 disabled:opacity-60"
+                  title="إعادة تحميل البيانات الأولية"
+                >
+                  {pendingAction === "reset" ? (
+                    <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  ) : (
+                    <RotateCcw className="h-4 w-4" />
+                  )}
+                  {pendingAction === "reset" ? "جارٍ الاستعادة..." : "استعادة المخزون"}
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -672,7 +871,7 @@ export default function MedicineDashboard({
         {/* KPI Cards */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           <button
-            onClick={() => setSelectedStatus("all")}
+            onClick={() => selectStatus("all")}
             className={`text-right p-4 rounded-xl border bg-white shadow-sm transition ${
               selectedStatus === "all"
                 ? "ring-2 ring-emerald-600 border-emerald-600"
@@ -689,7 +888,7 @@ export default function MedicineDashboard({
           </button>
 
           <button
-            onClick={() => setSelectedStatus("expired")}
+            onClick={() => selectStatus("expired")}
             className={`text-right p-4 rounded-xl border bg-white shadow-sm transition ${
               selectedStatus === "expired"
                 ? "ring-2 ring-red-600 border-red-600"
@@ -706,7 +905,7 @@ export default function MedicineDashboard({
           </button>
 
           <button
-            onClick={() => setSelectedStatus("rx")}
+            onClick={() => selectStatus("rx")}
             className={`text-right p-4 rounded-xl border bg-white shadow-sm transition ${
               selectedStatus === "rx"
                 ? "ring-2 ring-amber-600 border-amber-600"
@@ -721,7 +920,7 @@ export default function MedicineDashboard({
           </button>
 
           <button
-            onClick={() => setSelectedStatus("out")}
+            onClick={() => selectStatus("out")}
             className={`text-right p-4 rounded-xl border bg-white shadow-sm transition ${
               selectedStatus === "out"
                 ? "ring-2 ring-slate-600 border-slate-600"
@@ -754,7 +953,7 @@ export default function MedicineDashboard({
               </div>
             </div>
             <button
-              onClick={() => setSelectedStatus("expired")}
+              onClick={() => selectStatus("expired")}
               className="bg-red-600 hover:bg-red-700 text-white text-sm font-semibold px-4 py-2 rounded-lg shrink-0"
             >
               عرض المنتهي فقط
@@ -763,13 +962,23 @@ export default function MedicineDashboard({
         )}
 
         {/* Search & Filters */}
-        <div className="bg-white p-4 rounded-xl border border-slate-200 shadow-sm flex flex-col md:flex-row gap-3">
-          <div className="relative flex-1">
+        <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:p-5">
+          <div className="mb-3 flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <h2 className="font-bold text-slate-900">البحث والتصفية</h2>
+            <p className="text-xs text-slate-500">
+              {filteredMedicines.length} نتيجة من أصل {medicines.length} صنف
+            </p>
+          </div>
+          <div className="grid grid-cols-1 gap-3 md:grid-cols-[minmax(0,1fr)_minmax(210px,0.65fr)_minmax(170px,0.5fr)]">
+          <div className="relative min-w-0">
             <Search className="w-5 h-5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               value={search}
-              onChange={(e) => setSearch(e.target.value)}
+              onChange={(e) => {
+                setSearch(e.target.value);
+                setCurrentPage(1);
+              }}
               placeholder="ابحث باسم الدواء، المادة الفعالة (مثل Paracetamol)، أو الاستخدام..."
               className="w-full pr-10 pl-4 py-2.5 border border-slate-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
             />
@@ -777,7 +986,11 @@ export default function MedicineDashboard({
 
           <select
             value={selectedCategory}
-            onChange={(e) => setSelectedCategory(e.target.value)}
+            onChange={(e) => {
+              setSelectedCategory(e.target.value);
+              setCurrentPage(1);
+            }}
+            aria-label="تصفية حسب الفئة"
             className="border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
           >
             <option value="all">جميع الفئات العلاجية ({medicines.length})</option>
@@ -790,7 +1003,8 @@ export default function MedicineDashboard({
 
           <select
             value={selectedStatus}
-            onChange={(e) => setSelectedStatus(e.target.value)}
+            onChange={(e) => selectStatus(e.target.value)}
+            aria-label="تصفية حسب الحالة"
             className="border border-slate-300 rounded-lg px-3 py-2.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-emerald-600"
           >
             <option value="all">جميع الحالات</option>
@@ -799,12 +1013,116 @@ export default function MedicineDashboard({
             <option value="rx">بوصفة طبية 📋</option>
             <option value="out">نفد من المخزون (0)</option>
           </select>
+          </div>
         </div>
 
         {/* Table */}
         <div className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full text-right border-collapse">
+          <div className="divide-y divide-slate-200 md:hidden">
+            {paginatedMedicines.map((item) => {
+              const isExpired = item.status === "expired";
+              const isPending = pendingMedicineIds.has(item.id);
+              return (
+                <article key={item.id} className="space-y-3 p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="min-w-0">
+                      <h3 className="font-bold text-slate-900">{item.name}</h3>
+                      <p dir="ltr" className="mt-1 break-words text-right text-sm text-slate-600">
+                        {item.activeIngredient || "المادة الفعالة غير محددة"}
+                      </p>
+                    </div>
+                    <div className="flex shrink-0 flex-col items-end gap-1">
+                      {isExpired && (
+                        <span className="rounded-full bg-red-100 px-2 py-1 text-[11px] font-semibold text-red-800">
+                          منتهي {item.expiryDate && `(${item.expiryDate})`}
+                        </span>
+                      )}
+                      {item.rxRequired && (
+                        <span className="rounded-full bg-amber-100 px-2 py-1 text-[11px] font-semibold text-amber-800">
+                          بوصفة طبية
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-3 rounded-xl bg-slate-50 p-3 text-sm">
+                    <div>
+                      <p className="text-xs text-slate-500">الفئة</p>
+                      <p className="mt-1 font-medium text-slate-800">{item.category}</p>
+                      {item.subCategory && (
+                        <p className="mt-0.5 text-xs text-slate-500">{item.subCategory}</p>
+                      )}
+                    </div>
+                    <div>
+                      <p className="text-xs text-slate-500">الاستخدام</p>
+                      <p className="mt-1 text-slate-700">{item.usage || "غير محدد"}</p>
+                    </div>
+                    {item.notes && (
+                      <div className="col-span-2">
+                        <p className="text-xs text-slate-500">ملاحظات</p>
+                        <p className="mt-1 text-slate-700">{item.notes}</p>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between gap-3 border-t border-slate-100 pt-3">
+                    <div className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+                      <button
+                        onClick={() => handleQuantityChange(item, -1)}
+                        disabled={isPending}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                        aria-label={`إنقاص كمية ${item.name}`}
+                      >
+                        <Minus className="h-4 w-4" />
+                      </button>
+                      <span className={`min-w-8 text-center font-bold ${item.quantity === 0 ? "text-red-600" : "text-slate-900"}`}>
+                        {isPending ? (
+                          <span aria-label="جارٍ تحديث الكمية" className="mx-auto block h-4 w-4 animate-spin rounded-full border-2 border-emerald-600 border-t-transparent" />
+                        ) : item.quantity}
+                      </span>
+                      <button
+                        onClick={() => handleQuantityChange(item, 1)}
+                        disabled={isPending}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 hover:bg-slate-100 disabled:opacity-40"
+                        aria-label={`زيادة كمية ${item.name}`}
+                      >
+                        <Plus className="h-4 w-4" />
+                      </button>
+                    </div>
+                    <div className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
+                      <button
+                        onClick={() => openEditModal(item)}
+                        disabled={isPending}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40"
+                        aria-label={`تعديل ${item.name}`}
+                      >
+                        <Edit3 className="h-4 w-4" />
+                      </button>
+                      <button
+                        onClick={() => handleDelete(item.id, item.name)}
+                        disabled={isPending}
+                        className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
+                        aria-label={`حذف ${item.name}`}
+                      >
+                        {isPending ? (
+                          <span aria-label="جارٍ الحذف" className="block h-4 w-4 animate-spin rounded-full border-2 border-red-600 border-t-transparent" />
+                        ) : (
+                          <Trash2 className="h-4 w-4" />
+                        )}
+                      </button>
+                    </div>
+                  </div>
+                </article>
+              );
+            })}
+            {filteredMedicines.length === 0 && (
+              <p className="px-4 py-12 text-center text-sm text-slate-500">
+                لا توجد أدوية مطابقة لخيارات البحث أو التصفية الحالية.
+              </p>
+            )}
+          </div>
+          <div className="hidden overflow-x-auto md:block">
+            <table className="w-full min-w-[1050px] text-right border-collapse">
               <thead>
                 <tr className="bg-slate-100 border-b border-slate-200 text-slate-700 text-xs uppercase">
                   <th className="py-3.5 px-4 font-bold">الدواء / المنتج</th>
@@ -827,7 +1145,7 @@ export default function MedicineDashboard({
                     </td>
                   </tr>
                 ) : (
-                  filteredMedicines.map((item) => {
+                  paginatedMedicines.map((item) => {
                     const isExpired = item.status === "expired";
                     return (
                       <tr
@@ -873,12 +1191,13 @@ export default function MedicineDashboard({
                           {item.usage}
                         </td>
                         <td className="py-3.5 px-4">
-                          <div className="flex items-center justify-center gap-2">
+                          <div className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
                             <button
                               onClick={() => handleQuantityChange(item, -1)}
                               disabled={pendingMedicineIds.has(item.id)}
-                              className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-50"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 transition hover:bg-slate-100 disabled:opacity-40"
                               title="إنقاص الكمية"
+                              aria-label={`إنقاص كمية ${item.name}`}
                             >
                               <Minus className="w-3.5 h-3.5" />
                             </button>
@@ -896,8 +1215,9 @@ export default function MedicineDashboard({
                             <button
                               onClick={() => handleQuantityChange(item, 1)}
                               disabled={pendingMedicineIds.has(item.id)}
-                              className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-50"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-600 transition hover:bg-slate-100 disabled:opacity-40"
                               title="زيادة الكمية"
+                              aria-label={`زيادة كمية ${item.name}`}
                             >
                               <Plus className="w-3.5 h-3.5" />
                             </button>
@@ -906,20 +1226,23 @@ export default function MedicineDashboard({
                         <td className="py-3.5 px-4 text-xs text-slate-600 max-w-xs">
                           {item.notes}
                         </td>
-                        <td className="py-3.5 px-4">
-                          <div className="flex items-center justify-center gap-2">
+                        <td className="py-3.5 px-4 text-center">
+                          <div className="inline-flex items-center gap-1 rounded-xl border border-slate-200 bg-white p-1 shadow-sm">
                             <button
                               onClick={() => openEditModal(item)}
-                              className="p-1.5 text-slate-600 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition"
+                              disabled={pendingMedicineIds.has(item.id)}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-emerald-50 hover:text-emerald-700 disabled:opacity-40"
                               title="تعديل"
+                              aria-label={`تعديل ${item.name}`}
                             >
                               <Edit3 className="w-4 h-4" />
                             </button>
                             <button
                               onClick={() => handleDelete(item.id, item.name)}
                               disabled={pendingMedicineIds.has(item.id)}
-                              className="p-1.5 text-slate-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition disabled:opacity-50"
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-slate-500 transition hover:bg-red-50 hover:text-red-700 disabled:opacity-40"
                               title="حذف"
+                              aria-label={`حذف ${item.name}`}
                             >
                               {pendingMedicineIds.has(item.id) ? (
                                 <span aria-label="جارٍ الحذف" className="block h-4 w-4 animate-spin rounded-full border-2 border-red-600 border-t-transparent" />
@@ -935,6 +1258,60 @@ export default function MedicineDashboard({
                 )}
               </tbody>
             </table>
+          </div>
+          <div className="flex flex-col gap-3 border-t border-slate-200 bg-slate-50/80 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm text-slate-600">
+              <span>
+                عرض {firstVisibleItem}–{lastVisibleItem} من {filteredMedicines.length}
+              </span>
+              <label className="inline-flex items-center gap-2">
+                <span className="text-xs text-slate-500">لكل صفحة</span>
+                <select
+                  value={pageSize}
+                  onChange={(event) => {
+                    setPageSize(Number(event.target.value));
+                    setCurrentPage(1);
+                  }}
+                  className="rounded-lg border border-slate-300 bg-white px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-emerald-600"
+                  aria-label="عدد الأصناف في الصفحة"
+                >
+                  {PAGE_SIZE_OPTIONS.map((size) => (
+                    <option key={size} value={size}>{size}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+            <nav aria-label="التنقل بين صفحات الأدوية" className="flex items-center gap-1">
+              <button
+                onClick={() => setCurrentPage((page) => Math.max(1, page - 1))}
+                disabled={visiblePage === 1}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                السابق
+              </button>
+              {pageNumbers.map((page) => (
+                <button
+                  key={page}
+                  onClick={() => setCurrentPage(page)}
+                  aria-current={page === visiblePage ? "page" : undefined}
+                  aria-label={`الصفحة ${page}`}
+                  className={`h-9 min-w-9 rounded-lg px-2 text-sm font-semibold transition ${
+                    page === visiblePage
+                      ? "bg-emerald-700 text-white shadow-sm"
+                      : "border border-slate-300 bg-white text-slate-700 hover:bg-slate-100"
+                  }`}
+                >
+                  {page}
+                </button>
+              ))}
+              <button
+                onClick={() => setCurrentPage((page) => Math.min(pageCount, page + 1))}
+                disabled={visiblePage === pageCount}
+                className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-700 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                التالي
+              </button>
+            </nav>
           </div>
         </div>
       </main>
@@ -1059,7 +1436,10 @@ export default function MedicineDashboard({
               </button>
             </header>
 
-            <div className="flex-1 space-y-3 overflow-y-auto p-4">
+            <div
+              ref={chatMessagesContainerRef}
+              className="flex-1 space-y-3 overflow-y-auto p-4"
+            >
               {chatMessages.length === 0 && (
                 <div className="space-y-3">
                   <p className="text-sm text-slate-600">
@@ -1092,7 +1472,7 @@ export default function MedicineDashboard({
               {chatLoading && (
                 <div className="ml-auto flex max-w-[90%] items-center gap-2 rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-500">
                   <span className="h-4 w-4 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
-                  جارٍ البحث في المخزون...
+                  {chatStreaming ? "جارٍ كتابة الإجابة..." : "جارٍ البحث في المخزون..."}
                 </div>
               )}
             </div>
@@ -1132,6 +1512,18 @@ export default function MedicineDashboard({
             </form>
           </section>
         </div>
+      )}
+
+      {!showChat && (
+        <button
+          type="button"
+          onClick={() => setShowChat(true)}
+          aria-label="اسأل صيدليتي"
+          className="fixed bottom-5 right-5 z-40 inline-flex min-h-14 items-center gap-2 rounded-full bg-violet-600 px-5 text-sm font-bold text-white shadow-xl ring-4 ring-violet-100/70 transition hover:bg-violet-700 focus-visible:outline-none focus-visible:ring-violet-300 sm:bottom-7 sm:right-7"
+        >
+          <MessageCircle className="h-5 w-5" />
+          اسأل صيدليتي
+        </button>
       )}
 
       {/* Add / Edit Modal */}
