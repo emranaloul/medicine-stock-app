@@ -115,12 +115,24 @@ export default function MedicineDashboard({
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formData, setFormData] = useState(EMPTY_FORM);
   const [loading, setLoading] = useState(false);
+  const [pendingAction, setPendingAction] = useState<"save" | "reset" | "batch" | null>(null);
   const [scanning, setScanning] = useState(false);
   const [extractedItems, setExtractedItems] = useState<ExtractedMedicine[]>([]);
   const [showChat, setShowChat] = useState(false);
   const [chatMessages, setChatMessages] = useState<PharmacyChatMessage[]>([]);
   const [chatInput, setChatInput] = useState("");
   const [chatLoading, setChatLoading] = useState(false);
+  const [scopeLoading, setScopeLoading] = useState(false);
+  const [pendingScope, setPendingScope] = useState<{
+    scope: "personal" | "family";
+    familyId: string;
+  } | null>(null);
+  const [logoutLoading, setLogoutLoading] = useState(false);
+  const [pendingMedicineIds, setPendingMedicineIds] = useState<Set<number>>(
+    () => new Set()
+  );
+  const [copyingFamilyId, setCopyingFamilyId] = useState<string | null>(null);
+  const [copiedFamilyId, setCopiedFamilyId] = useState<string | null>(null);
 
   const stats = useMemo(() => {
     const total = medicines.length;
@@ -192,21 +204,39 @@ export default function MedicineDashboard({
   }
 
   async function switchScope(nextScope: "personal" | "family", familyId = activeFamilyId) {
-    setScope(nextScope);
-    setActiveFamilyId(familyId);
-    setChatMessages([]);
-    const res = await fetch("/api/medicines", {
-      headers: {
-        "x-pharmacy-scope": nextScope,
-        "x-family-id": nextScope === "family" ? familyId : "",
-      },
-    });
-    if (res.ok) setMedicines(await res.json());
+    if (scopeLoading || (scope === nextScope && activeFamilyId === familyId)) return;
+    setScopeLoading(true);
+    setPendingScope({ scope: nextScope, familyId });
+    try {
+      const res = await fetch("/api/medicines", {
+        headers: {
+          "x-pharmacy-scope": nextScope,
+          "x-family-id": nextScope === "family" ? familyId : "",
+        },
+      });
+      if (!res.ok) throw new Error("تعذر تحميل المخزون المحدد");
+      setMedicines(await res.json());
+      setScope(nextScope);
+      setActiveFamilyId(familyId);
+      setChatMessages([]);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذر تبديل المخزون.");
+    } finally {
+      setScopeLoading(false);
+      setPendingScope(null);
+    }
   }
 
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
-    window.location.href = "/login";
+    setLogoutLoading(true);
+    try {
+      const res = await fetch("/api/auth/logout", { method: "POST" });
+      if (!res.ok) throw new Error("تعذر تسجيل الخروج");
+      window.location.href = "/login";
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذر تسجيل الخروج.");
+      setLogoutLoading(false);
+    }
   }
 
   async function sendChatMessage(rawMessage = chatInput) {
@@ -247,22 +277,38 @@ export default function MedicineDashboard({
 
   async function refreshMedicines() {
     const res = await fetch("/api/medicines", { headers: scopeHeaders() });
-    if (res.ok) {
-      const data = await res.json();
-      setMedicines(data);
-    }
+    if (!res.ok) throw new Error("تعذر تحديث المخزون");
+    setMedicines(await res.json());
   }
 
   async function handleQuantityChange(item: Medicine, delta: number) {
+    if (pendingMedicineIds.has(item.id)) return;
     const nextQty = Math.max(0, item.quantity + delta);
+    setPendingMedicineIds((current) => new Set(current).add(item.id));
     setMedicines((prev) =>
       prev.map((m) => (m.id === item.id ? { ...m, quantity: nextQty } : m))
     );
-    await fetch(`/api/medicines/${item.id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json", ...scopeHeaders() },
-      body: JSON.stringify({ quantity: nextQty }),
-    });
+    try {
+      const res = await fetch(`/api/medicines/${item.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", ...scopeHeaders() },
+        body: JSON.stringify({ quantity: nextQty }),
+      });
+      if (!res.ok) throw new Error("تعذر تحديث الكمية");
+    } catch (error) {
+      setMedicines((prev) =>
+        prev.map((medicine) =>
+          medicine.id === item.id ? { ...medicine, quantity: item.quantity } : medicine
+        )
+      );
+      alert(error instanceof Error ? error.message : "تعذر تحديث الكمية.");
+    } finally {
+      setPendingMedicineIds((current) => {
+        const next = new Set(current);
+        next.delete(item.id);
+        return next;
+      });
+    }
   }
 
   function openAddModal() {
@@ -290,8 +336,9 @@ export default function MedicineDashboard({
 
   async function handleSaveForm(e: React.FormEvent) {
     e.preventDefault();
-    if (!formData.name.trim()) return;
+    if (loading || !formData.name.trim()) return;
     setLoading(true);
+    setPendingAction("save");
     try {
       if (editingId) {
         const res = await fetch(`/api/medicines/${editingId}`, {
@@ -299,36 +346,62 @@ export default function MedicineDashboard({
           headers: { "Content-Type": "application/json", ...scopeHeaders() },
           body: JSON.stringify(formData),
         });
-        if (res.ok) {
-          const updated = await res.json();
-          setMedicines((prev) =>
-            prev.map((m) => (m.id === editingId ? updated : m))
-          );
-        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "تعذر تحديث الدواء");
+        setMedicines((prev) =>
+          prev.map((m) => (m.id === editingId ? data : m))
+        );
       } else {
         const res = await fetch("/api/medicines", {
           method: "POST",
           headers: { "Content-Type": "application/json", ...scopeHeaders() },
           body: JSON.stringify(formData),
         });
-        if (res.ok) {
-          const created = await res.json();
-          setMedicines((prev) => [created, ...prev]);
-        }
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || "تعذر إضافة الدواء");
+        setMedicines((prev) => [data, ...prev]);
       }
       setIsFormOpen(false);
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذر حفظ الدواء.");
     } finally {
       setLoading(false);
+      setPendingAction(null);
     }
   }
 
   async function handleDelete(id: number, name: string) {
+    if (pendingMedicineIds.has(id)) return;
     if (!confirm(`هل أنت متأكد من حذف "${name}" من المخزون؟`)) return;
+    const deletedItem = medicines.find((medicine) => medicine.id === id);
+    setPendingMedicineIds((current) => new Set(current).add(id));
     setMedicines((prev) => prev.filter((m) => m.id !== id));
-    await fetch(`/api/medicines/${id}`, { method: "DELETE", headers: scopeHeaders() });
+    try {
+      const res = await fetch(`/api/medicines/${id}`, {
+        method: "DELETE",
+        headers: scopeHeaders(),
+      });
+      if (!res.ok) throw new Error("تعذر حذف الدواء");
+    } catch (error) {
+      if (deletedItem) {
+        setMedicines((current) =>
+          current.some((medicine) => medicine.id === id)
+            ? current
+            : [...current, deletedItem]
+        );
+      }
+      alert(error instanceof Error ? error.message : "تعذر حذف الدواء.");
+    } finally {
+      setPendingMedicineIds((current) => {
+        const next = new Set(current);
+        next.delete(id);
+        return next;
+      });
+    }
   }
 
   async function handleResetSeed() {
+    if (loading) return;
     if (
       !confirm(
         "هل تريد إعادة ضبط قاعدة البيانات واستعادة المخزون الأصلي (71 صنفاً)؟"
@@ -336,16 +409,32 @@ export default function MedicineDashboard({
     )
       return;
     setLoading(true);
+    setPendingAction("reset");
     try {
       const res = await fetch("/api/seed", {
         method: "POST",
         headers: scopeHeaders(),
       });
-      if (res.ok) {
-        await refreshMedicines();
-      }
+      if (!res.ok) throw new Error("تعذر استعادة المخزون الأصلي");
+      await refreshMedicines();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذر استعادة المخزون.");
     } finally {
       setLoading(false);
+      setPendingAction(null);
+    }
+  }
+
+  async function copyInviteCode(family: (typeof families)[number]) {
+    setCopyingFamilyId(family.id);
+    setCopiedFamilyId(null);
+    try {
+      await navigator.clipboard.writeText(family.inviteCode);
+      setCopiedFamilyId(family.id);
+    } catch {
+      alert("تعذر نسخ الرمز. يمكنك تحديده ونسخه يدوياً.");
+    } finally {
+      setCopyingFamilyId(null);
     }
   }
 
@@ -378,7 +467,7 @@ export default function MedicineDashboard({
   }
 
   async function handleImageUpload(file: File | undefined) {
-    if (!file) return;
+    if (!file || scanning) return;
     setScanning(true);
     setExtractedItems([]);
     try {
@@ -431,9 +520,10 @@ export default function MedicineDashboard({
     const selected = extractedItems
       .filter((item) => item.selected)
       .map(({ selected: _selected, ...item }) => item);
-    if (selected.length === 0) return;
+    if (loading || selected.length === 0) return;
 
     setLoading(true);
+    setPendingAction("batch");
     try {
       const res = await fetch("/api/medicines/batch", {
         method: "POST",
@@ -450,6 +540,7 @@ export default function MedicineDashboard({
       alert(error instanceof Error ? error.message : "تعذر حفظ العناصر.");
     } finally {
       setLoading(false);
+      setPendingAction(null);
     }
   }
 
@@ -497,30 +588,36 @@ export default function MedicineDashboard({
               </label>
               <button
                 onClick={logout}
-                className="inline-flex items-center gap-2 bg-emerald-950/40 hover:bg-emerald-950/60 text-white px-3.5 py-2.5 rounded-lg text-sm transition"
+                disabled={logoutLoading}
+                className="inline-flex items-center gap-2 bg-emerald-950/40 hover:bg-emerald-950/60 text-white px-3.5 py-2.5 rounded-lg text-sm transition disabled:opacity-60"
               >
-                تسجيل الخروج
+                {logoutLoading && <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />}
+                {logoutLoading ? "جارٍ تسجيل الخروج..." : "تسجيل الخروج"}
               </button>
               <div className="flex bg-emerald-700 rounded-lg p-1">
                 <button
                   onClick={() => switchScope("personal")}
+                  disabled={scopeLoading}
                   className={`px-3 py-2 rounded-md text-sm font-semibold transition ${
                     scope === "personal" ? "bg-white text-emerald-900" : "text-emerald-100"
-                  }`}
+                  } disabled:opacity-60`}
                 >
-                  صيدليتي الخاصة
+                  {pendingScope?.scope === "personal" ? "جارٍ التحميل..." : "صيدليتي الخاصة"}
                 </button>
                 {families.map((family) => (
                   <button
                     key={family.id}
                     onClick={() => switchScope("family", family.id)}
+                    disabled={scopeLoading}
                     className={`px-3 py-2 rounded-md text-sm font-semibold transition ${
                       scope === "family" && activeFamilyId === family.id
                         ? "bg-white text-emerald-900"
                         : "text-emerald-100"
-                    }`}
+                    } disabled:opacity-60`}
                   >
-                    {family.name}
+                    {pendingScope?.scope === "family" && pendingScope.familyId === family.id
+                      ? "جارٍ التحميل..."
+                      : family.name}
                   </button>
                 ))}
               </div>
@@ -552,8 +649,12 @@ export default function MedicineDashboard({
                 className="inline-flex items-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white px-3.5 py-2.5 rounded-lg text-sm transition"
                 title="إعادة تحميل البيانات الأولية"
               >
-                <RotateCcw className="w-4 h-4" />
-                استعادة المخزون الأصلي
+                {pendingAction === "reset" ? (
+                  <span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                ) : (
+                  <RotateCcw className="w-4 h-4" />
+                )}
+                {pendingAction === "reset" ? "جارٍ استعادة المخزون..." : "استعادة المخزون الأصلي"}
               </button>
               <button
                 onClick={openAddModal}
@@ -775,7 +876,8 @@ export default function MedicineDashboard({
                           <div className="flex items-center justify-center gap-2">
                             <button
                               onClick={() => handleQuantityChange(item, -1)}
-                              className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700"
+                              disabled={pendingMedicineIds.has(item.id)}
+                              className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-50"
                               title="إنقاص الكمية"
                             >
                               <Minus className="w-3.5 h-3.5" />
@@ -787,11 +889,14 @@ export default function MedicineDashboard({
                                   : "text-slate-900"
                               }`}
                             >
-                              {item.quantity}
+                              {pendingMedicineIds.has(item.id) ? (
+                                <span aria-label="جارٍ تحديث الكمية" className="mx-auto block h-4 w-4 animate-spin rounded-full border-2 border-emerald-600 border-t-transparent" />
+                              ) : item.quantity}
                             </span>
                             <button
                               onClick={() => handleQuantityChange(item, 1)}
-                              className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700"
+                              disabled={pendingMedicineIds.has(item.id)}
+                              className="p-1 rounded bg-slate-100 hover:bg-slate-200 text-slate-700 disabled:opacity-50"
                               title="زيادة الكمية"
                             >
                               <Plus className="w-3.5 h-3.5" />
@@ -812,10 +917,15 @@ export default function MedicineDashboard({
                             </button>
                             <button
                               onClick={() => handleDelete(item.id, item.name)}
-                              className="p-1.5 text-slate-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition"
+                              disabled={pendingMedicineIds.has(item.id)}
+                              className="p-1.5 text-slate-600 hover:text-red-700 hover:bg-red-50 rounded-lg transition disabled:opacity-50"
                               title="حذف"
                             >
-                              <Trash2 className="w-4 h-4" />
+                              {pendingMedicineIds.has(item.id) ? (
+                                <span aria-label="جارٍ الحذف" className="block h-4 w-4 animate-spin rounded-full border-2 border-red-600 border-t-transparent" />
+                              ) : (
+                                <Trash2 className="w-4 h-4" />
+                              )}
                             </button>
                           </div>
                         </td>
@@ -920,7 +1030,7 @@ export default function MedicineDashboard({
                 disabled={loading || !extractedItems.some((item) => item.selected)}
                 className="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold disabled:opacity-50"
               >
-                {loading ? "جاري الحفظ..." : `حفظ المحدد (${extractedItems.filter((item) => item.selected).length})`}
+                {pendingAction === "batch" ? "جاري الحفظ..." : `حفظ المحدد (${extractedItems.filter((item) => item.selected).length})`}
               </button>
             </div>
           </div>
@@ -1219,7 +1329,7 @@ export default function MedicineDashboard({
                   disabled={loading}
                   className="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold"
                 >
-                  {loading ? "جاري الحفظ..." : "حفظ"}
+                  {pendingAction === "save" ? "جاري الحفظ..." : "حفظ"}
                 </button>
               </div>
             </form>
@@ -1254,10 +1364,16 @@ export default function MedicineDashboard({
                       </div>
                     </div>
                     <button
-                      onClick={() => navigator.clipboard.writeText(family.inviteCode)}
-                      className="px-3 py-2 rounded-lg bg-emerald-700 text-white text-sm"
+                      onClick={() => copyInviteCode(family)}
+                      disabled={copyingFamilyId === family.id}
+                      className="inline-flex min-w-20 items-center justify-center gap-2 px-3 py-2 rounded-lg bg-emerald-700 text-white text-sm disabled:opacity-60"
                     >
-                      نسخ
+                      {copyingFamilyId === family.id ? (
+                        <>
+                          <span aria-hidden="true" className="h-3.5 w-3.5 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                          جارٍ النسخ...
+                        </>
+                      ) : copiedFamilyId === family.id ? "تم النسخ" : "نسخ"}
                     </button>
                   </div>
                   <div className="space-y-2">
