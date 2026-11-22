@@ -1,0 +1,25 @@
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = "file:C:/Users/emran/OneDrive/سطح المكتب/medicine-stock-app/prisma/dev.db"
+}
+
+model Medicine {
+  id               Int      @id @default(autoincrement())
+  name             String
+  activeIngredient String
+  category         String
+  subCategory      String
+  usage            String
+  quantity         Int      @default(1)
+  expiryDate       String   @default("")
+  status           String   @default("valid") // "valid" | "expired"
+  rxRequired       Boolean  @default(false)
+  notes            String   @default("")
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}

@@ -1,0 +1,42 @@
+# صيدليتي المنزلية | Medicine Stock Manager (Next.js + SQLite + Vercel)
+
+تطبيق ويب متكامل لإدارة مخزون الأدوية والمستلزمات الطبية المنزلية مبني باستخدام **Next.js (App Router)** و **Prisma** مع قاعدة بيانات **SQLite / libSQL (Turso)**، ومجهز مسبقاً ببيانات مخزونك الحالي الكاملة (71 صنفاً).
+
+## المميزات
+- **بدون تسجيل دخول (No Auth):** جاهز للاستخدام المباشر.
+- **مخزونك الكامل مدمج (Seed Data):** يحتوي على جميع الأدوية والمستلزمات الـ 71 مصنفة حسب الفئة العلاجية مع تنبيهات الصلاحية والوصفات الطبية.
+- **إدارة سريعة للكميات:** أزرار `+` و `-` لتحديث الكميات فوراً، مع إضافة وتعديل وحذف أي دواء.
+- **كشف تكرار المواد الفعالة تلقائياً:** نافذة تنبيه تجمع الأدوية التي تشترك في نفس المادة الفعالة (مثل Paracetamol, Levocetirizine, Ketoprofen, Budesonide, Vitamin D3).
+- **جاهز للنشر على Vercel:** يستخدم `@prisma/adapter-libsql` ليعمل محلياً بملف SQLite عادي (`file:./prisma/dev.db`) وعلى Vercel عبر قاعدة بيانات Turso السحابية المجانية.
+
+---
+
+## 1. التشغيل محلياً (Local Development)
+
+```bash
+npm install
+cp .env.example .env
+npx prisma db push
+npm run db:seed
+npm run dev
+```
+افتح المتصفح على `http://localhost:3000`.
+
+---
+
+## 2. النشر على Vercel مع SQLite (Turso)
+
+لأن منصة Vercel تعمل بنظام Serverless (حيث يُعاد ضبط نظام الملفات المحلي عند كل نشر)، فإن أفضل طريقة لاستخدام SQLite على Vercel هي **Turso** (خدمة SQLite سحابية متوافقة تماماً ولها باقة مجانية سخية):
+
+1. أنشئ حساباً مجانياً على [turso.tech](https://turso.tech) وأنشئ قاعدة بيانات جديدة (مثلاً `medicine-stock`).
+2. انسخ رابط القاعدة (`TURSO_DATABASE_URL`) ومفتاح الوصول (`TURSO_AUTH_TOKEN`).
+3. ارفع هذا المشروع إلى GitHub ثم اربطه مع **Vercel**.
+4. في إعدادات المشروع على Vercel (**Settings -> Environment Variables**)، أضف المتغيرين:
+   - `TURSO_DATABASE_URL` = رابط قاعدة البيانات من Turso
+   - `TURSO_AUTH_TOKEN` = التوكن الخاص بالقاعدة
+5. لإنشاء الجداول في قاعدة Turso لأول مرة من جهازك، ضع المتغيرين في ملف `.env` المحلي ونفذ:
+   ```bash
+   npx prisma db push
+   npm run db:seed
+   ```
+   *(ملاحظة: التطبيق يقوم أيضاً بزراعة البيانات تلقائياً عند أول زيارة إذا كانت قاعدة البيانات فارغة!)*
