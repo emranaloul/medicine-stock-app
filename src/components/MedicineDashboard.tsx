@@ -58,10 +58,23 @@ const EMPTY_FORM = {
 
 export default function MedicineDashboard({
   initialMedicines,
+  user,
+  families,
 }: {
   initialMedicines: Medicine[];
+  user: { id: string; name: string; email: string };
+  families: Array<{
+    id: string;
+    name: string;
+    inviteCode: string;
+    role: string;
+    members: Array<{ id: string; name: string; email: string; role: string }>;
+  }>;
 }) {
   const [medicines, setMedicines] = useState<Medicine[]>(initialMedicines);
+  const [scope, setScope] = useState<"personal" | "family">("personal");
+  const [activeFamilyId, setActiveFamilyId] = useState(families[0]?.id || "");
+  const [showFamilyModal, setShowFamilyModal] = useState(false);
   const [search, setSearch] = useState("");
   const [selectedCategory, setSelectedCategory] = useState("all");
   const [selectedStatus, setSelectedStatus] = useState("all");
@@ -135,8 +148,32 @@ export default function MedicineDashboard({
     });
   }, [medicines, selectedCategory, selectedStatus, search]);
 
+  function scopeHeaders() {
+    return {
+      "x-pharmacy-scope": scope,
+      "x-family-id": scope === "family" ? activeFamilyId : "",
+    };
+  }
+
+  async function switchScope(nextScope: "personal" | "family", familyId = activeFamilyId) {
+    setScope(nextScope);
+    setActiveFamilyId(familyId);
+    const res = await fetch("/api/medicines", {
+      headers: {
+        "x-pharmacy-scope": nextScope,
+        "x-family-id": nextScope === "family" ? familyId : "",
+      },
+    });
+    if (res.ok) setMedicines(await res.json());
+  }
+
+  async function logout() {
+    await fetch("/api/auth/logout", { method: "POST" });
+    window.location.href = "/login";
+  }
+
   async function refreshMedicines() {
-    const res = await fetch("/api/medicines");
+    const res = await fetch("/api/medicines", { headers: scopeHeaders() });
     if (res.ok) {
       const data = await res.json();
       setMedicines(data);
@@ -150,7 +187,7 @@ export default function MedicineDashboard({
     );
     await fetch(`/api/medicines/${item.id}`, {
       method: "PATCH",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...scopeHeaders() },
       body: JSON.stringify({ quantity: nextQty }),
     });
   }
@@ -186,7 +223,7 @@ export default function MedicineDashboard({
       if (editingId) {
         const res = await fetch(`/api/medicines/${editingId}`, {
           method: "PATCH",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...scopeHeaders() },
           body: JSON.stringify(formData),
         });
         if (res.ok) {
@@ -198,7 +235,7 @@ export default function MedicineDashboard({
       } else {
         const res = await fetch("/api/medicines", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...scopeHeaders() },
           body: JSON.stringify(formData),
         });
         if (res.ok) {
@@ -215,7 +252,7 @@ export default function MedicineDashboard({
   async function handleDelete(id: number, name: string) {
     if (!confirm(`هل أنت متأكد من حذف "${name}" من المخزون؟`)) return;
     setMedicines((prev) => prev.filter((m) => m.id !== id));
-    await fetch(`/api/medicines/${id}`, { method: "DELETE" });
+    await fetch(`/api/medicines/${id}`, { method: "DELETE", headers: scopeHeaders() });
   }
 
   async function handleResetSeed() {
@@ -227,7 +264,10 @@ export default function MedicineDashboard({
       return;
     setLoading(true);
     try {
-      const res = await fetch("/api/seed", { method: "POST" });
+      const res = await fetch("/api/seed", {
+        method: "POST",
+        headers: scopeHeaders(),
+      });
       if (res.ok) {
         await refreshMedicines();
       }
@@ -255,6 +295,43 @@ export default function MedicineDashboard({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={logout}
+                className="inline-flex items-center gap-2 bg-emerald-950/40 hover:bg-emerald-950/60 text-white px-3.5 py-2.5 rounded-lg text-sm transition"
+              >
+                تسجيل الخروج
+              </button>
+              <div className="flex bg-emerald-700 rounded-lg p-1">
+                <button
+                  onClick={() => switchScope("personal")}
+                  className={`px-3 py-2 rounded-md text-sm font-semibold transition ${
+                    scope === "personal" ? "bg-white text-emerald-900" : "text-emerald-100"
+                  }`}
+                >
+                  صيدليتي الخاصة
+                </button>
+                {families.map((family) => (
+                  <button
+                    key={family.id}
+                    onClick={() => switchScope("family", family.id)}
+                    className={`px-3 py-2 rounded-md text-sm font-semibold transition ${
+                      scope === "family" && activeFamilyId === family.id
+                        ? "bg-white text-emerald-900"
+                        : "text-emerald-100"
+                    }`}
+                  >
+                    {family.name}
+                  </button>
+                ))}
+              </div>
+              {families.length > 0 && (
+                <button
+                  onClick={() => setShowFamilyModal(true)}
+                  className="inline-flex items-center gap-2 bg-emerald-700 hover:bg-emerald-600 text-white px-3.5 py-2.5 rounded-lg text-sm transition"
+                >
+                  إدارة أفراد العائلة
+                </button>
+              )}
               <button
                 onClick={() => setShowDuplicatesModal(true)}
                 className="inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold px-4 py-2.5 rounded-lg text-sm transition"
@@ -744,6 +821,58 @@ export default function MedicineDashboard({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Family Members Modal */}
+      {showFamilyModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl">
+            <div className="flex items-center justify-between border-b pb-3 mb-4">
+              <h2 className="text-lg font-bold text-slate-900">إدارة أفراد العائلة</h2>
+              <button
+                onClick={() => setShowFamilyModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            {families
+              .filter((family) =>
+                scope === "family" ? family.id === activeFamilyId : true
+              )
+              .map((family) => (
+                <div key={family.id} className="space-y-4">
+                  <div className="flex items-center justify-between gap-3 bg-emerald-50 border border-emerald-200 rounded-lg p-3">
+                    <div>
+                      <div className="text-xs text-slate-500">رمز الدعوة</div>
+                      <div dir="ltr" className="font-bold text-emerald-900">
+                        {family.inviteCode}
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => navigator.clipboard.writeText(family.inviteCode)}
+                      className="px-3 py-2 rounded-lg bg-emerald-700 text-white text-sm"
+                    >
+                      نسخ
+                    </button>
+                  </div>
+                  <div className="space-y-2">
+                    {family.members.map((member) => (
+                      <div key={member.id} className="flex items-center justify-between border rounded-lg p-3">
+                        <div>
+                          <div className="font-semibold">{member.name}</div>
+                          <div dir="ltr" className="text-xs text-slate-500 text-right">{member.email}</div>
+                        </div>
+                        <span className="text-xs font-bold bg-slate-100 px-2 py-1 rounded">
+                          {member.role === "ADMIN" ? "مسؤول" : "عضو"}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ))}
           </div>
         </div>
       )}

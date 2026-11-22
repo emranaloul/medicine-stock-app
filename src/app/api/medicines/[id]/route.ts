@@ -1,11 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
+import { requireUser, getAuthorizedScope } from "@/lib/pharmacy";
 
 export async function PATCH(
   request: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { user, response } = await requireUser();
+    if (!user) return response;
+    const scope = await getAuthorizedScope(request, user.id);
+    if (!scope.valid) {
+      return NextResponse.json({ error: "ليس لديك صلاحية لهذا المخزون" }, { status: 403 });
+    }
+
     const { id } = await context.params;
     const medicineId = Number(id);
     if (Number.isNaN(medicineId)) {
@@ -31,6 +39,15 @@ export async function PATCH(
     if (body.rxRequired !== undefined) data.rxRequired = Boolean(body.rxRequired);
     if (body.notes !== undefined) data.notes = String(body.notes).trim();
 
+    const existing = await prisma.medicine.findFirst({
+      where: scope.scope === "family"
+        ? { id: medicineId, familyId: scope.familyId, userId: null }
+        : { id: medicineId, userId: user.id, familyId: null },
+    });
+    if (!existing) {
+      return NextResponse.json({ error: "الدواء غير موجود في هذا المخزون" }, { status: 404 });
+    }
+
     const updated = await prisma.medicine.update({
       where: { id: medicineId },
       data,
@@ -47,12 +64,32 @@ export async function PATCH(
 }
 
 export async function DELETE(
-  _request: NextRequest,
+  request: NextRequest,
   context: { params: Promise<{ id: string }> }
 ) {
   try {
+    const { user, response } = await requireUser();
+    if (!user) return response;
+    const scope = await getAuthorizedScope(request, user.id);
+    if (!scope.valid) {
+      return NextResponse.json({ error: "ليس لديك صلاحية لهذا المخزون" }, { status: 403 });
+    }
+
     const { id } = await context.params;
     const medicineId = Number(id);
+    if (Number.isNaN(medicineId)) {
+      return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
+    }
+
+    const existing = await prisma.medicine.findFirst({
+      where: scope.scope === "family"
+        ? { id: medicineId, familyId: scope.familyId, userId: null }
+        : { id: medicineId, userId: user.id, familyId: null },
+    });
+    if (!existing) {
+      return NextResponse.json({ error: "الدواء غير موجود في هذا المخزون" }, { status: 404 });
+    }
+
     if (Number.isNaN(medicineId)) {
       return NextResponse.json({ error: "Invalid ID" }, { status: 400 });
     }
