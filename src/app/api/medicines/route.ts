@@ -1,16 +1,27 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { ensureSeeded } from "@/lib/ensure-seeded";
+import { requireUser, getAuthorizedScope } from "@/lib/pharmacy";
 
 export async function GET(request: NextRequest) {
   try {
-    await ensureSeeded();
+    const { user, response } = await requireUser();
+    if (!user) return response;
+    const scope = await getAuthorizedScope(request, user.id);
+    if (!scope.valid) {
+      return NextResponse.json({ error: "ليس لديك صلاحية لهذا المخزون" }, { status: 403 });
+    }
+
+    await ensureSeeded(scope.scope === "family" ? scope.familyId : null, scope.scope === "personal" ? user.id : null);
     const { searchParams } = new URL(request.url);
     const search = searchParams.get("search")?.trim() || "";
     const category = searchParams.get("category") || "all";
     const status = searchParams.get("status") || "all";
 
-    const where: Record<string, unknown> = {};
+    const where: Record<string, unknown> =
+      scope.scope === "family"
+        ? { familyId: scope.familyId, userId: null }
+        : { userId: user.id, familyId: null };
 
     if (category !== "all") {
       where.category = category;
@@ -53,6 +64,13 @@ export async function GET(request: NextRequest) {
 
 export async function POST(request: NextRequest) {
   try {
+    const { user, response } = await requireUser();
+    if (!user) return response;
+    const scope = await getAuthorizedScope(request, user.id);
+    if (!scope.valid) {
+      return NextResponse.json({ error: "ليس لديك صلاحية لهذا المخزون" }, { status: 403 });
+    }
+
     const body = await request.json();
     const created = await prisma.medicine.create({
       data: {
@@ -66,6 +84,8 @@ export async function POST(request: NextRequest) {
         status: body.status === "expired" ? "expired" : "valid",
         rxRequired: Boolean(body.rxRequired),
         notes: String(body.notes || "").trim(),
+        familyId: scope.familyId,
+        userId: scope.scope === "personal" ? user.id : null,
       },
     });
 
