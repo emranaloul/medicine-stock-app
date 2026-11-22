@@ -15,6 +15,8 @@ import {
   X,
   Minus,
   ShieldAlert,
+  Camera,
+  Images,
 } from "lucide-react";
 
 export interface Medicine {
@@ -56,6 +58,20 @@ const EMPTY_FORM = {
   notes: "",
 };
 
+interface ExtractedMedicine {
+  name: string;
+  activeIngredient: string;
+  category: string;
+  subCategory: string;
+  usage: string;
+  quantity: number;
+  expiryDate: string;
+  status: "valid" | "expired";
+  rxRequired: boolean;
+  notes: string;
+  selected: boolean;
+}
+
 export default function MedicineDashboard({
   initialMedicines,
   user,
@@ -85,6 +101,8 @@ export default function MedicineDashboard({
   const [editingId, setEditingId] = useState<number | null>(null);
   const [formData, setFormData] = useState(EMPTY_FORM);
   const [loading, setLoading] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [extractedItems, setExtractedItems] = useState<ExtractedMedicine[]>([]);
 
   const stats = useMemo(() => {
     const total = medicines.length;
@@ -276,6 +294,110 @@ export default function MedicineDashboard({
     }
   }
 
+  async function compressImage(file: File) {
+    const objectUrl = URL.createObjectURL(file);
+    try {
+      const image = await new Promise<HTMLImageElement>((resolve, reject) => {
+        const element = new Image();
+        element.onload = () => resolve(element);
+        element.onerror = () => reject(new Error("تعذر قراءة الصورة"));
+        element.src = objectUrl;
+      });
+
+      const scale = Math.min(1, 1600 / Math.max(image.width, image.height));
+      const canvas = document.createElement("canvas");
+      canvas.width = Math.max(1, Math.round(image.width * scale));
+      canvas.height = Math.max(1, Math.round(image.height * scale));
+      const context = canvas.getContext("2d");
+      if (!context) throw new Error("تعذر معالجة الصورة");
+      context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+      return {
+        mimeType: "image/jpeg",
+        imageBase64: dataUrl.split(",")[1] || "",
+      };
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
+  }
+
+  async function handleImageUpload(file: File | undefined) {
+    if (!file) return;
+    setScanning(true);
+    setExtractedItems([]);
+    try {
+      const image = await compressImage(file);
+      const res = await fetch("/api/scan-medicines", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...scopeHeaders() },
+        body: JSON.stringify(image),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "تعذر تحليل الصورة");
+
+      const normalized = (Array.isArray(data.items) ? data.items : []).map(
+        (item: Partial<ExtractedMedicine>) => ({
+          name: String(item.name || "").trim(),
+          activeIngredient: String(item.activeIngredient || "").trim(),
+          category: CATEGORIES.includes(String(item.category || ""))
+            ? String(item.category)
+            : CATEGORIES[8],
+          subCategory: String(item.subCategory || "عام").trim(),
+          usage: String(item.usage || "").trim(),
+          quantity: Math.max(0, Number(item.quantity ?? 1)),
+          expiryDate: String(item.expiryDate || "").trim(),
+          status: item.status === "expired" ? "expired" : "valid",
+          rxRequired: Boolean(item.rxRequired),
+          notes: String(item.notes || "").trim(),
+          selected: true,
+        })
+      );
+      setExtractedItems(normalized);
+      if (normalized.length === 0) {
+        alert("لم يتم العثور على أدوية واضحة في الصورة.");
+      }
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذر تحليل الصورة.");
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  function updateExtractedItem(index: number, patch: Partial<ExtractedMedicine>) {
+    setExtractedItems((current) =>
+      current.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, ...patch } : item
+      )
+    );
+  }
+
+  async function saveExtractedItems() {
+    const selected = extractedItems
+      .filter((item) => item.selected)
+      .map(({ selected: _selected, ...item }) => item);
+    if (selected.length === 0) return;
+
+    setLoading(true);
+    try {
+      const res = await fetch("/api/medicines/batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...scopeHeaders() },
+        body: JSON.stringify({ items: selected }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        throw new Error(data.error || "تعذر حفظ العناصر");
+      }
+      setExtractedItems([]);
+      await refreshMedicines();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "تعذر حفظ العناصر.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <div className="min-h-screen pb-12">
       {/* Header */}
@@ -295,6 +417,29 @@ export default function MedicineDashboard({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <label className="inline-flex items-center gap-2 bg-sky-600 hover:bg-sky-700 text-white font-semibold px-4 py-2.5 rounded-lg text-sm cursor-pointer transition">
+                <Camera className="w-4 h-4" />
+                تصوير وإضافة بالذكاء الاصطناعي
+                <input
+                  type="file"
+                  accept="image/*"
+                  capture="environment"
+                  className="hidden"
+                  onChange={(event) => handleImageUpload(event.target.files?.[0])}
+                  disabled={scanning}
+                />
+              </label>
+              <label className="inline-flex items-center gap-2 bg-white/15 hover:bg-white/25 text-white px-3.5 py-2.5 rounded-lg text-sm cursor-pointer transition">
+                <Images className="w-4 h-4" />
+                رفع صورة من المعرض
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(event) => handleImageUpload(event.target.files?.[0])}
+                  disabled={scanning}
+                />
+              </label>
               <button
                 onClick={logout}
                 className="inline-flex items-center gap-2 bg-emerald-950/40 hover:bg-emerald-950/60 text-white px-3.5 py-2.5 rounded-lg text-sm transition"
@@ -621,6 +766,104 @@ export default function MedicineDashboard({
           </div>
         </div>
       </main>
+
+      {scanning && (
+        <div className="fixed inset-0 z-[60] bg-slate-950/40 flex items-center justify-center">
+          <div className="bg-white rounded-2xl px-6 py-5 shadow-xl flex items-center gap-3 text-slate-800">
+            <div className="w-5 h-5 border-2 border-emerald-600 border-t-transparent rounded-full animate-spin" />
+            جاري تحليل الصورة واستخراج الدواء...
+          </div>
+        </div>
+      )}
+
+      {extractedItems.length > 0 && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-2xl max-w-5xl w-full p-6 shadow-xl max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b pb-3 mb-4">
+              <div>
+                <h2 className="text-lg font-bold text-slate-900">مراجعة العناصر المستخرجة</h2>
+                <p className="text-sm text-slate-500 mt-1">عدّل أو ألغِ تحديد أي عنصر قبل الحفظ في المخزون الحالي.</p>
+              </div>
+              <button
+                onClick={() => setExtractedItems([])}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              {extractedItems.map((item, index) => (
+                <div key={index} className={`grid grid-cols-1 md:grid-cols-[auto_1.2fr_1fr_1fr_auto] gap-3 items-end border rounded-xl p-3 ${item.selected ? "border-emerald-200 bg-emerald-50/30" : "border-slate-200 bg-slate-50"}`}>
+                  <label className="flex items-center gap-2 md:self-center">
+                    <input
+                      type="checkbox"
+                      checked={item.selected}
+                      onChange={(event) => updateExtractedItem(index, { selected: event.target.checked })}
+                      className="rounded text-emerald-600"
+                    />
+                    <span className="text-sm font-semibold">حفظ</span>
+                  </label>
+                  <label className="text-xs font-semibold text-slate-600">
+                    اسم الدواء
+                    <input
+                      value={item.name}
+                      onChange={(event) => updateExtractedItem(index, { name: event.target.value })}
+                      className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-600">
+                    المادة الفعالة
+                    <input
+                      value={item.activeIngredient}
+                      onChange={(event) => updateExtractedItem(index, { activeIngredient: event.target.value })}
+                      className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </label>
+                  <label className="text-xs font-semibold text-slate-600">
+                    الفئة
+                    <select
+                      value={CATEGORIES.includes(item.category) ? item.category : CATEGORIES[8]}
+                      onChange={(event) => updateExtractedItem(index, { category: event.target.value })}
+                      className="mt-1 w-full border border-slate-300 rounded-lg px-3 py-2 text-sm bg-white"
+                    >
+                      {CATEGORIES.map((category) => (
+                        <option key={category} value={category}>{category}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="text-xs font-semibold text-slate-600">
+                    الكمية
+                    <input
+                      type="number"
+                      min={0}
+                      value={item.quantity}
+                      onChange={(event) => updateExtractedItem(index, { quantity: Math.max(0, Number(event.target.value)) })}
+                      className="mt-1 w-20 border border-slate-300 rounded-lg px-3 py-2 text-sm"
+                    />
+                  </label>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex justify-end gap-2 pt-4 mt-4 border-t">
+              <button
+                onClick={() => setExtractedItems([])}
+                className="px-4 py-2 rounded-lg border border-slate-300 text-slate-700"
+              >
+                إلغاء
+              </button>
+              <button
+                onClick={saveExtractedItems}
+                disabled={loading || !extractedItems.some((item) => item.selected)}
+                className="px-5 py-2 rounded-lg bg-emerald-700 hover:bg-emerald-800 text-white font-semibold disabled:opacity-50"
+              >
+                {loading ? "جاري الحفظ..." : `حفظ المحدد (${extractedItems.filter((item) => item.selected).length})`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Add / Edit Modal */}
       {isFormOpen && (
