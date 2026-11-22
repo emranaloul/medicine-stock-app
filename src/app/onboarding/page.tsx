@@ -8,20 +8,29 @@ export default function OnboardingPage() {
   const [name, setName] = useState("");
   const [inviteCode, setInviteCode] = useState("");
   const [error, setError] = useState("");
+  const [loadingAction, setLoadingAction] = useState<"create" | "join" | null>(null);
 
   async function familyAction(action: "create" | "join") {
+    if (loadingAction !== null) return;
     setError("");
-    const res = await fetch("/api/families", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(action === "create" ? { action, name } : { action, inviteCode }),
-    });
-    if (!res.ok) {
-      const data = await res.json();
-      setError(data.error || "تعذر تنفيذ طلب الانضمام");
-    } else {
-      router.push("/");
-      router.refresh();
+    setLoadingAction(action);
+    try {
+      const res = await fetch("/api/families", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(action === "create" ? { action, name } : { action, inviteCode }),
+      });
+      if (!res.ok) {
+        const data = await res.json();
+        setError(data.error || "تعذر تنفيذ طلب الانضمام");
+      } else {
+        router.push("/");
+        router.refresh();
+      }
+    } catch {
+      setError("تعذر الاتصال بالخادم. حاول مرة أخرى.");
+    } finally {
+      setLoadingAction(null);
     }
   }
 
@@ -33,14 +42,18 @@ export default function OnboardingPage() {
         <div className="space-y-2 border rounded-xl p-4">
           <h2 className="font-bold">إنشاء صيدلية عائلية</h2>
           <input required placeholder="اسم العائلة" value={name} onChange={(e) => setName(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2" />
-          <button onClick={() => familyAction("create")} className="w-full rounded-lg bg-emerald-700 text-white py-2.5 font-bold">إنشاء العائلة</button>
+          <button disabled={loadingAction !== null} onClick={() => familyAction("create")} className="w-full rounded-lg bg-emerald-700 text-white py-2.5 font-bold disabled:opacity-60">
+            {loadingAction === "create" ? <span className="inline-flex items-center gap-2"><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />جارٍ إنشاء العائلة...</span> : "إنشاء العائلة"}
+          </button>
         </div>
         <div className="space-y-2 border rounded-xl p-4">
           <h2 className="font-bold">الانضمام برمز دعوة</h2>
           <input dir="ltr" placeholder="رمز الدعوة" value={inviteCode} onChange={(e) => setInviteCode(e.target.value)} className="w-full border border-slate-300 rounded-lg px-3 py-2" />
-          <button onClick={() => familyAction("join")} className="w-full rounded-lg bg-slate-700 text-white py-2.5 font-bold">انضمام للعائلة</button>
+          <button disabled={loadingAction !== null} onClick={() => familyAction("join")} className="w-full rounded-lg bg-slate-700 text-white py-2.5 font-bold disabled:opacity-60">
+            {loadingAction === "join" ? <span className="inline-flex items-center gap-2"><span aria-hidden="true" className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />جارٍ الانضمام...</span> : "انضمام للعائلة"}
+          </button>
         </div>
-        <button onClick={() => router.push("/")} className="w-full text-sm text-slate-600">التخطي واستخدام الصيدلية الخاصة فقط</button>
+        <button disabled={loadingAction !== null} onClick={() => router.push("/")} className="w-full text-sm text-slate-600 disabled:opacity-60">التخطي واستخدام الصيدلية الخاصة فقط</button>
       </div>
     </main>
   );
