@@ -17,6 +17,8 @@ import {
   ShieldAlert,
   Camera,
   Images,
+  MessageCircle,
+  Send,
 } from "lucide-react";
 
 export interface Medicine {
@@ -72,6 +74,18 @@ interface ExtractedMedicine {
   selected: boolean;
 }
 
+interface PharmacyChatMessage {
+  role: "user" | "model";
+  content: string;
+}
+
+const CHAT_SUGGESTIONS = [
+  "ما الأدوية منتهية الصلاحية أو التي أوشكت على الانتهاء؟",
+  "هل لدي مسكن أو مرخي عضل آمن للمرضع؟",
+  "ما الأدوية المتوفرة للصداع أو الحرارة؟",
+  "هل يوجد تكرار في المواد الفعالة بمخزوني؟",
+];
+
 export default function MedicineDashboard({
   initialMedicines,
   user,
@@ -103,6 +117,10 @@ export default function MedicineDashboard({
   const [loading, setLoading] = useState(false);
   const [scanning, setScanning] = useState(false);
   const [extractedItems, setExtractedItems] = useState<ExtractedMedicine[]>([]);
+  const [showChat, setShowChat] = useState(false);
+  const [chatMessages, setChatMessages] = useState<PharmacyChatMessage[]>([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatLoading, setChatLoading] = useState(false);
 
   const stats = useMemo(() => {
     const total = medicines.length;
@@ -176,6 +194,7 @@ export default function MedicineDashboard({
   async function switchScope(nextScope: "personal" | "family", familyId = activeFamilyId) {
     setScope(nextScope);
     setActiveFamilyId(familyId);
+    setChatMessages([]);
     const res = await fetch("/api/medicines", {
       headers: {
         "x-pharmacy-scope": nextScope,
@@ -188,6 +207,42 @@ export default function MedicineDashboard({
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     window.location.href = "/login";
+  }
+
+  async function sendChatMessage(rawMessage = chatInput) {
+    const message = rawMessage.trim();
+    if (!message || chatLoading) return;
+
+    const history = chatMessages;
+    setChatMessages((current) => [...current, { role: "user", content: message }]);
+    setChatInput("");
+    setChatLoading(true);
+    try {
+      const res = await fetch("/api/ask-pharmacy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...scopeHeaders() },
+        body: JSON.stringify({ message, history }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "تعذر الحصول على إجابة");
+      setChatMessages((current) => [
+        ...current,
+        { role: "model", content: data.answer },
+      ]);
+    } catch (error) {
+      setChatMessages((current) => [
+        ...current,
+        {
+          role: "model",
+          content:
+            error instanceof Error
+              ? error.message
+              : "تعذر الاتصال بمساعد الصيدلية.",
+        },
+      ]);
+    } finally {
+      setChatLoading(false);
+    }
   }
 
   async function refreshMedicines() {
@@ -477,6 +532,13 @@ export default function MedicineDashboard({
                   إدارة أفراد العائلة
                 </button>
               )}
+              <button
+                onClick={() => setShowChat(true)}
+                className="inline-flex items-center gap-2 bg-violet-600 hover:bg-violet-700 text-white font-semibold px-4 py-2.5 rounded-lg text-sm transition"
+              >
+                <MessageCircle className="w-4 h-4" />
+                اسأل صيدليتي
+              </button>
               <button
                 onClick={() => setShowDuplicatesModal(true)}
                 className="inline-flex items-center gap-2 bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold px-4 py-2.5 rounded-lg text-sm transition"
@@ -862,6 +924,103 @@ export default function MedicineDashboard({
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {showChat && (
+        <div className="fixed inset-0 z-[70] flex justify-end bg-black/40">
+          <section className="flex h-full w-full max-w-xl flex-col bg-white shadow-2xl">
+            <header className="flex items-center justify-between border-b bg-violet-800 px-5 py-4 text-white">
+              <div>
+                <h2 className="flex items-center gap-2 text-lg font-bold">
+                  <MessageCircle className="h-5 w-5" />
+                  اسأل صيدليتي
+                </h2>
+                <p className="mt-1 text-xs text-violet-100">
+                  الإجابات مبنية على {scope === "family" ? "مخزون العائلة" : "مخزونك الشخصي"}
+                </p>
+              </div>
+              <button
+                onClick={() => setShowChat(false)}
+                aria-label="إغلاق المساعد"
+                className="rounded-lg p-2 hover:bg-violet-700"
+              >
+                <X className="h-5 w-5" />
+              </button>
+            </header>
+
+            <div className="flex-1 space-y-3 overflow-y-auto p-4">
+              {chatMessages.length === 0 && (
+                <div className="space-y-3">
+                  <p className="text-sm text-slate-600">
+                    اسأل عن الأدوية الموجودة أو الصلاحية أو تكرار المواد الفعالة.
+                  </p>
+                  {CHAT_SUGGESTIONS.map((suggestion) => (
+                    <button
+                      key={suggestion}
+                      disabled={chatLoading}
+                      onClick={() => sendChatMessage(suggestion)}
+                      className="block w-full rounded-xl border border-violet-200 bg-violet-50 px-3 py-2.5 text-right text-sm text-violet-900 hover:bg-violet-100 disabled:opacity-50"
+                    >
+                      {suggestion}
+                    </button>
+                  ))}
+                </div>
+              )}
+              {chatMessages.map((message, index) => (
+                <div
+                  key={`${index}-${message.role}`}
+                  className={`max-w-[90%] whitespace-pre-wrap rounded-2xl px-4 py-3 text-sm leading-6 ${
+                    message.role === "user"
+                      ? "mr-auto bg-emerald-700 text-white"
+                      : "ml-auto border border-slate-200 bg-slate-50 text-slate-800"
+                  }`}
+                >
+                  {message.content}
+                </div>
+              ))}
+              {chatLoading && (
+                <div className="ml-auto flex max-w-[90%] items-center gap-2 rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-500">
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-violet-500 border-t-transparent" />
+                  جارٍ البحث في المخزون...
+                </div>
+              )}
+            </div>
+
+            <div className="border-t bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-900">
+              معلومات المخزون لا تؤكد ملاءمة الدواء أو سلامته. لا تعتمد على المساعد للتشخيص أو الجرعات أو التداخلات؛ استشر طبيباً أو صيدلياً.
+            </div>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                void sendChatMessage();
+              }}
+              className="flex items-end gap-2 border-t p-4"
+            >
+              <textarea
+                value={chatInput}
+                onChange={(event) => setChatInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void sendChatMessage();
+                  }
+                }}
+                maxLength={1000}
+                rows={2}
+                placeholder="اكتب سؤالك..."
+                className="min-h-11 flex-1 resize-none rounded-xl border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+              />
+              <button
+                type="submit"
+                disabled={chatLoading || !chatInput.trim()}
+                aria-label="إرسال السؤال"
+                className="rounded-xl bg-violet-700 p-3 text-white hover:bg-violet-800 disabled:opacity-50"
+              >
+                <Send className="h-5 w-5" />
+              </button>
+            </form>
+          </section>
         </div>
       )}
 
