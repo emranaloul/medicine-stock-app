@@ -5,7 +5,7 @@ generator client {
 
 datasource db {
   provider = "sqlite"
-  url      = "file:C:/Users/emran/OneDrive/سطح المكتب/medicine-stock-app/prisma/dev.db"
+  url      = env("TURSO_DATABASE_URL")
 }
 
 model Medicine {
