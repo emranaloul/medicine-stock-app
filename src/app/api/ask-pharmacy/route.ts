@@ -87,7 +87,7 @@ export async function POST(request: NextRequest) {
 سجل المخزون (${scope.scope === "family" ? "العائلي" : "الشخصي"}): ${JSON.stringify(inventory)}`;
 
     const ai = new GoogleGenAI({ apiKey });
-    const result = await ai.models.generateContent({
+    const result = await ai.models.generateContentStream({
       model: "gemini-3.5-flash-lite",
       contents: [
         ...history.map((item) => ({
@@ -99,14 +99,28 @@ export async function POST(request: NextRequest) {
       config: { systemInstruction },
     });
 
-    const answer = result.text?.trim();
-    if (!answer) {
-      return NextResponse.json(
-        { error: "لم أتمكن من إنشاء إجابة. حاول مرة أخرى." },
-        { status: 502 }
-      );
-    }
-    return NextResponse.json({ answer });
+    const encoder = new TextEncoder();
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for await (const chunk of result) {
+            if (chunk.text) controller.enqueue(encoder.encode(chunk.text));
+          }
+          controller.close();
+        } catch (error) {
+          console.error("POST /api/ask-pharmacy stream error:", error);
+          controller.error(error);
+        }
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        "X-Accel-Buffering": "no",
+      },
+    });
   } catch (error) {
     console.error("POST /api/ask-pharmacy error:", error);
     return NextResponse.json(
