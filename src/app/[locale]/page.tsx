@@ -2,13 +2,23 @@ import { prisma } from "@/lib/prisma";
 import { ensureSeeded } from "@/lib/ensure-seeded";
 import { getSessionUser } from "@/lib/auth";
 import MedicineDashboard from "@/components/MedicineDashboard";
-import { redirect } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
+import { getDictionary } from "@/i18n/dictionaries";
+import { isLocale } from "@/i18n/config";
 
 export const dynamic = "force-dynamic";
 
-export default async function HomePage() {
+export default async function HomePage({
+  params,
+}: {
+  params: Promise<{ locale: string }>;
+}) {
+  const { locale: localeParam } = await params;
+  if (!isLocale(localeParam)) notFound();
+  const locale = localeParam;
+  const dictionary = await getDictionary(locale);
   const user = await getSessionUser();
-  if (!user) redirect("/login");
+  if (!user) redirect(`/${locale}/login`);
 
   const memberships = await prisma.familyMember.findMany({
     where: { userId: user.id },
@@ -42,6 +52,8 @@ export default async function HomePage() {
 
   return (
     <MedicineDashboard
+      locale={locale}
+      dictionary={dictionary}
       initialMedicines={medicines}
       user={{ id: user.id, name: user.name, email: user.email }}
       families={families}
